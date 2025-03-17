@@ -31,15 +31,28 @@ from transformers import Trainer, BitsAndBytesConfig
 from transformers.trainer_pt_utils import LabelSmoother
 from safetensors.torch import save_file
 
+import deepspeed
+from transformers.integrations import deepspeed as hfdeepspeed
+
 from fastchat.conversation import SeparatorStyle
 from fastchat.model.model_adapter import get_conversation_template
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 import os
 from medusa.model.medusa_model_legacy import MedusaModel, MedusaConfig
+from datasets import load_dataset
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
+def alpaca_chat_template(messages):
+    # Format the messages as a chat with alternating "user" and "assistant" turns
+    chat = ""
+    for message in messages:
+        if message['role'] == 'user':
+            chat += f"User: {message['content']}\n"
+        elif message['role'] == 'assistant':
+            chat += f"Assistant: {message['content']}\n"
+    return chat.strip()
 
 # Customized for training Medusa heads
 class CustomizedTrainer(Trainer):
@@ -161,7 +174,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
 
 def preprocess(
-    sources,
+    formatted_text,
     tokenizer: transformers.PreTrainedTokenizer,
 ) -> Dict:
     """
@@ -175,42 +188,31 @@ def preprocess(
         Dict: A dictionary containing tokenized inputs, labels, and attention mask.
     """
 
-    # Apply prompt templates
-    conversations = []
-    prompts = []
-    # # import pdb; pdb.set_trace()
-    for i, conversation in enumerate(sources):
-        prompt = tokenizer.apply_chat_template(conversation, tokenize=False)
-        prompts.append(prompt)
-        conversations.append(conversation)
+    if "### Response:" not in formatted_text:
+        raise ValueError("formatted_text must contain '### Response:'")
 
-    # Tokenize conversations
+    # Tokenize the formatted text
     encoding = tokenizer(
-        prompts,
+        formatted_text,
         return_tensors="pt",
         padding="max_length",
         truncation=True,
         return_offsets_mapping=True,
     )
-    # Set everything to be ignored, except the assistant part
+
+    # Initialize targets with ignore tokens
     targets = torch.full_like(encoding.input_ids, IGNORE_TOKEN_ID)
     input_ids = encoding.input_ids
 
-    # Mask targets. Only compute loss on the assistant outputs.
-    for conv_index, (conversation, target, prompt) in enumerate(zip(conversations, targets, prompts)):
+    # Find the assistant response in the formatted text and mask it
+    assistant_response = formatted_text.split("### Response:")[1].strip()
+    start = formatted_text.index(assistant_response)
+    stop = start + len(assistant_response)
 
-        for turn in conversation:
-            if turn["role"] == "assistant":
-                content = turn["content"]
-                # Unfortunate strip() necessary because chat templates are doing the same.
-                start = prompt.index(content.strip())
-                stop = start + len(content)
-                indices= []
-                for tok_index, (tok_start, tok_stop) in enumerate(encoding.offset_mapping[conv_index]):
-                    if tok_stop >= start or tok_start < tok_stop:
-                        indices.append(tok_index)
-                target[indices] = encoding.input_ids[conv_index][indices]
-
+    # Mask the assistant response in the targets
+    for tok_index, (tok_start, tok_stop) in enumerate(encoding.offset_mapping[0]):
+        if tok_start >= start and tok_stop <= stop:
+            targets[0][tok_index] = input_ids[0][tok_index]
 
     return dict(
         input_ids=input_ids,
@@ -230,62 +232,66 @@ class SupervisedDataset(Dataset):
     def __init__(self, raw_data, tokenizer: transformers.PreTrainedTokenizer):
         super(SupervisedDataset, self).__init__()
 
-        rank0_print("Formatting inputs...")
-        sources = raw_data
-        data_dict = preprocess(sources, tokenizer)
+        super(SupervisedDataset, self).__init__()
 
-        self.input_ids = data_dict["input_ids"]
-        self.labels = data_dict["labels"]
-        self.attention_mask = data_dict["attention_mask"]
+        self.tokenizer = tokenizer
+        self.input_ids = raw_data["input_ids"]  # Directly use the tensors
+        self.labels = raw_data["labels"]
+        self.attention_mask = raw_data["attention_mask"]
+        # rank0_print("Formatting inputs...")
+        # self.tokenizer = tokenizer
+        # self.input_ids = []
+        # self.labels = []
+        # self.attention_mask = []
+
+        # from tqdm import tqdm
+        # # Use tqdm to add a progress bar
+        # for example in tqdm(raw_data, desc="Preprocessing data"):
+        #     formatted_text = example["formatted_text"]
+        #     data_dict = preprocess(formatted_text, tokenizer)
+        #     self.input_ids.append(data_dict["input_ids"][0])
+        #     self.labels.append(data_dict["labels"][0])
+        #     self.attention_mask.append(data_dict["attention_mask"][0])
+
+        # # Convert lists to tensors
+        # self.input_ids = torch.stack(self.input_ids)
+        # self.labels = torch.stack(self.labels)
+        # self.attention_mask = torch.stack(self.attention_mask)
 
     def __len__(self):
         return len(self.input_ids)
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+
         return dict(
             input_ids=self.input_ids[i],
             labels=self.labels[i],
             attention_mask=self.attention_mask[i],
         )
 
+def save_preprocessed_data(dataset, save_path):
+    """Save preprocessed dataset to disk."""
+    # Convert the dataset to a format that can be saved
+    data_dict = {
+        "input_ids": dataset.input_ids,
+        "labels": dataset.labels,
+        "attention_mask": dataset.attention_mask,
+    }
+    # Save using torch.save
+    torch.save(data_dict, save_path)
+    print(f"Preprocessed data saved to {save_path}")
 
-class LazySupervisedDataset(Dataset):
-    """Lazy dataset for supervised fine-tuning.
-
-    This dataset loads data on-the-fly when requested, which can be memory-efficient but slower.
-
-    Args:
-        raw_data (list): A list of raw data examples.
-        tokenizer (transformers.PreTrainedTokenizer): The tokenizer to use for data preprocessing.
-    """
-
-    def __init__(self, raw_data, tokenizer: transformers.PreTrainedTokenizer):
-        super(LazySupervisedDataset, self).__init__()
-        self.tokenizer = tokenizer
-
-        rank0_print("Formatting inputs...Skip in lazy mode")
-        self.tokenizer = tokenizer
-        self.raw_data = raw_data
-        self.cached_data_dict = {}
-
-    def __len__(self):
-        return len(self.raw_data)
-
-    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        if i in self.cached_data_dict:
-            return self.cached_data_dict[i]
-
-        ret = preprocess([self.raw_data[i]], self.tokenizer)
-        ret = dict(
-            input_ids=ret["input_ids"][0],
-            labels=ret["labels"][0],
-            attention_mask=ret["attention_mask"][0],
-        )
-        self.cached_data_dict[i] = ret
-
-        return ret
-
-
+def load_preprocessed_data(load_path, tokenizer):
+    """Load preprocessed dataset from disk."""
+    if os.path.exists(load_path):
+        print(f"Loading preprocessed data from {load_path}")
+        data_dict = torch.load(load_path)
+        print(data_dict.keys())
+        return SupervisedDataset(data_dict, tokenizer)
+    else:
+        print(f"No preprocessed data found at {load_path}")
+        return None
+    
 def make_supervised_data_module(
     tokenizer: transformers.PreTrainedTokenizer, data_args
 ) -> Dict:
@@ -298,21 +304,37 @@ def make_supervised_data_module(
     Returns:
         dict: A dictionary containing train and eval datasets.
     """
-    dataset_cls = (
-        LazySupervisedDataset if data_args.lazy_preprocess else SupervisedDataset
-    )
+
     rank0_print("Loading data...")
 
-    train_json = json.load(open(data_args.data_path, "r"))
-    train_dataset = dataset_cls(train_json, tokenizer=tokenizer)
+    train_dataset = load_preprocessed_data("/work1/deming/shared/alpaca-gpt4/preprocessed_train.pt", tokenizer)
+    if train_dataset is None:
+        # Preprocess and save training data
+        train_dataset = load_dataset("/work1/deming/shared/alpaca-gpt4", split="train")
+        def format_dataset(example):
+            messages = [
+                {"role": "user", "content": example["instruction"] + "\n" + example["input"]},
+                {"role": "assistant", "content": example["output"]},
+            ]
+            example["formatted_text"] = tokenizer.apply_chat_template(messages, tokenize=False)
+            return example
 
-    if data_args.eval_data_path:
-        eval_json = json.load(open(data_args.eval_data_path, "r"))
-        eval_dataset = dataset_cls(eval_json, tokenizer=tokenizer)
-    else:
-        eval_dataset = None
+        train_dataset = train_dataset.map(format_dataset)
+        train_dataset = SupervisedDataset(train_dataset, tokenizer=tokenizer)
+        train_save_path = os.path.join(data_args.data_path, "/work1/deming/shared/alpaca-gpt4/preprocessed_train.pt")
+        save_preprocessed_data(train_dataset, train_save_path)
+    
+    # print(f"train_dataset after dataset_cls: {train_dataset}")
 
-    return dict(train_dataset=train_dataset, eval_dataset=eval_dataset)
+    # # Load eval dataset from Parquet file if provided
+    # if data_args.eval_data_path:
+    #     eval_dataset = load_dataset("parquet", data_files=data_args.eval_data_path, split="train")
+    #     eval_dataset = dataset_cls(eval_dataset, tokenizer=tokenizer)
+    # else:
+    #     eval_dataset = None
+
+
+    return dict(train_dataset=train_dataset, eval_dataset=None)
 
 
 def train():
@@ -345,21 +367,58 @@ def train():
     tokenizer.pad_token = tokenizer.unk_token
     tokenizer.pad_token = tokenizer.eos_token
 
-    # Making sure the tokenizer works before loading the model.
-    print(tokenizer(["This is a test", "secondary"], padding=True))
-    print(tokenizer.apply_chat_template([{"role": "user", "content": "This is a test"}]))
+    alpaca_template = """
+    {% if messages[0]['role'] == 'system' %}
+        {% set loop_messages = messages[1:] %}
+        {% set system_message = messages[0]['content'] %}
+    {% else %}
+        {% set loop_messages = messages %}
+        {% set system_message = false %}
+    {% endif %}
 
-    # Load model and tokenizer
+    {% for message in loop_messages %}
+        {% if message['role'] == 'user' %}
+            {{ '### Instruction:\n' + message['content'] + '\n' }}
+        {% elif message['role'] == 'assistant' %}
+            {{ '### Response:\n' + message['content'] + '\n' }}
+        {% endif %}
+    {% endfor %}
+    """
+
+    tokenizer.chat_template = alpaca_template
+
+    data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
+
+    # Define a function for Alpaca-style chat formatti
+
+    # distributed setup
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    torch.cuda.set_device(local_rank)
+    deepspeed.init_distributed()
+    dschf = hfdeepspeed.HfDeepSpeedConfig("/work1/deming/seliny2/axolotl/deepspeed/zero3-offload.json")  # keep this object alive
+
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         config=config,
         cache_dir=training_args.cache_dir,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float16,
     )
+
+    model_engine = deepspeed.initialize(
+        config="/work1/deming/seliny2/axolotl/deepspeed/zero3-offload.json",
+        model=model,
+        model_parameters=model.parameters(),
+        config_params="/work1/deming/seliny2/axolotl/deepspeed/zero3-offload.json")[0]
+    model = model_engine.module
 
     # Freeze the base model
     for param in model.base_model.parameters():
         param.requires_grad = False
+
+    for  param in model.parameters():
+        if param.requires_grad and param.shape[-1] != 0 :
+            print(f"Trainable Parameter Shape: {param.shape}")
 
     # Add Medusa heads
     medusa_lm_head = MedusaModel(
@@ -369,20 +428,15 @@ def train():
         base_model_name_or_path=model_args.model_name_or_path,
     )
 
-    # Format output dir
-    training_args.output_dir = f"{training_args.output_dir}_medusa_mlp_{model_args.model_name_or_path.split('/')[-1]}_medusa_{training_args.medusa_num_heads}_lr_{training_args.learning_rate}_layers_{training_args.medusa_num_layers}"
-
-
-    # Load data
-    data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
-
     # Generate Medusa config for pushing to HF hub
     medusa_config = MedusaConfig(
         medusa_num_heads=training_args.medusa_num_heads,
         medusa_num_layers=training_args.medusa_num_layers,
         base_model_name_or_path=model_args.model_name_or_path,
-        version="2"
+        version="1"
     )
+
+    training_args.output_dir = f"{training_args.output_dir}_medusa_mlp_{model_args.model_name_or_path.split('/')[-1]}_medusa_{training_args.medusa_num_heads}_lr_{training_args.learning_rate}_layers_{training_args.medusa_num_layers}"
 
     # Save Medusa config
     medusa_config.save_pretrained(training_args.output_dir)
@@ -397,14 +451,14 @@ def train():
     else:
         trainer.train()
     model.config.use_cache = True
-    # trainer.save_state()
-    # safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
-    # Save MedusaHead seperately
+
     if hasattr(medusa_lm_head, "module"):
         lm_head = medusa_lm_head.module.medusa_head
     else:
         lm_head = medusa_lm_head.medusa_head
-    import deepspeed
+
+    print(f"Training complete.")
+
     with deepspeed.zero.GatheredParameters(lm_head.parameters()):
         state_dict = lm_head.state_dict()
 

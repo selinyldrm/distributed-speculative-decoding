@@ -22,7 +22,10 @@ from fastchat.model.model_adapter import get_conversation_template
 from fastchat.conversation import get_conv_template
 import json
 from medusa.model.medusa_model import MedusaModel
+# from needle_in_a_haystack.prompt import Prompter
 
+from transformers.integrations.deepspeed import HfDeepSpeedConfig
+import deepspeed
 
 def main(args):
     if args.style == "simple":
@@ -34,14 +37,24 @@ def main(args):
     else:
         raise ValueError(f"Invalid style for console: {args.style}")
     try:
+        ds_config =  "/work1/deming/seliny2/Medusa/deepspeed_config.json"
+        hfdsc = HfDeepSpeedConfig(ds_config)
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        world_size = int(os.getenv("WORLD_SIZE", "1"))
+        torch.cuda.set_device(local_rank)
+        deepspeed.init_distributed()
         model = MedusaModel.from_pretrained(
             args.model,
             torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-            device_map="auto",
+            # low_cpu_mem_usage=True,
+            # device_map="auto", turn off for DEEPSPEED !!!
             load_in_8bit=args.load_in_8bit,
             load_in_4bit=args.load_in_4bit,
+            trust_remote_code=True,
         )
+        ds_engine = deepspeed.initialize(model=model, config_params=ds_config)[0]
+        ds_engine.module.eval()
+        model = ds_engine.module
         tokenizer = model.get_tokenizer()
         conv = None
 
@@ -56,127 +69,49 @@ def main(args):
                 chatio.prompt_for_output(message[0])
                 chatio.print_output(message[1])
 
-        while True:
-            if not conv:
-                conv = new_chat()
+        # while True:
+        
+        if not conv:
+            conv = new_chat()
 
-            try:
-                inp = chatio.prompt_for_input(conv.roles[0])
-            except EOFError:
-                inp = ""
+        inp = None
+        if local_rank == 0:
+            inp = chatio.prompt_for_input(conv.roles[0])
 
-            if inp == "!!exit" or not inp:
-                print("exit...")
-                break
-            elif inp == "!!reset":
-                print("resetting...")
-                conv = new_chat()
-                continue
-            elif inp == "!!remove":
-                print("removing last message...")
-                if len(conv.messages) > conv.offset:
-                    # Assistant
-                    if conv.messages[-1][0] == conv.roles[1]:
-                        conv.messages.pop()
-                    # User
-                    if conv.messages[-1][0] == conv.roles[0]:
-                        conv.messages.pop()
-                    reload_conv(conv)
-                else:
-                    print("No messages to remove.")
-                continue
-            elif inp == "!!regen":
-                print("regenerating last message...")
-                if len(conv.messages) > conv.offset:
-                    # Assistant
-                    if conv.messages[-1][0] == conv.roles[1]:
-                        conv.messages.pop()
-                    # User
-                    if conv.messages[-1][0] == conv.roles[0]:
-                        reload_conv(conv)
-                        # Set inp to previous message
-                        inp = conv.messages.pop()[1]
-                    else:
-                        # Shouldn't happen in normal circumstances
-                        print("No user message to regenerate from.")
-                        continue
-                else:
-                    print("No messages to regenerate.")
-                    continue
-            elif inp.startswith("!!save"):
-                args = inp.split(" ", 1)
+        if torch.distributed.is_initialized():  # Ensure distributed is initialized
+            inp = [inp]  # Wrap in a list to make it compatible with broadcast
+            torch.distributed.broadcast_object_list(inp, src=0)
+            inp = inp[0]  # Unwrap the list
+            
+        torch.cuda.synchronize()
+        conv.append_message(conv.roles[0], inp)
+        conv.append_message(conv.roles[1], None)
+        prompt = conv.get_prompt()
 
-                if len(args) != 2:
-                    print("usage: !!save <filename>")
-                    continue
-                else:
-                    filename = args[1]
-
-                # Add .json if extension not present
-                if not "." in filename:
-                    filename += ".json"
-
-                print("saving...", filename)
-                with open(filename, "w") as outfile:
-                    json.dump(conv.dict(), outfile)
-                continue
-            elif inp.startswith("!!load"):
-                args = inp.split(" ", 1)
-
-                if len(args) != 2:
-                    print("usage: !!load <filename>")
-                    continue
-                else:
-                    filename = args[1]
-
-                # Check if file exists and add .json if needed
-                if not os.path.exists(filename):
-                    if (not filename.endswith(".json")) and os.path.exists(
-                        filename + ".json"
-                    ):
-                        filename += ".json"
-                    else:
-                        print("file not found:", filename)
-                        continue
-
-                print("loading...", filename)
-                with open(filename, "r") as infile:
-                    new_conv = json.load(infile)
-
-                conv = get_conv_template(new_conv["template_name"])
-                conv.set_system_message(new_conv["system_message"])
-                conv.messages = new_conv["messages"]
-                reload_conv(conv)
-                continue
-
-            conv.append_message(conv.roles[0], inp)
-            conv.append_message(conv.roles[1], None)
-            prompt = conv.get_prompt()
-
-            try:
-                chatio.prompt_for_output(conv.roles[1])
-                input_ids = tokenizer.encode(prompt, return_tensors="pt").to(
-                    model.base_model.device
+        try:
+            chatio.prompt_for_output(conv.roles[1])
+            input_ids = tokenizer.encode(prompt, return_tensors="pt").to(
+                model.base_model.device
+            )
+            outputs = chatio.stream_output(
+                model.medusa_generate(
+                    input_ids,
+                    temperature=args.temperature,
+                    max_steps=args.max_steps,
                 )
-                outputs = chatio.stream_output(
-                    model.medusa_generate(
-                        input_ids,
-                        temperature=args.temperature,
-                        max_steps=args.max_steps,
-                    )
-                )
-                conv.update_last_message(outputs.strip())
-
-            except KeyboardInterrupt:
-                print("stopped generation.")
-                # If generation didn't finish
-                if conv.messages[-1][1] is None:
+            )
+            conv.update_last_message(outputs.strip())
+        except KeyboardInterrupt:
+            print("stopped generation.")
+            # If generation didn't finish
+            if conv.messages[-1][1] is None:
+                conv.messages.pop()
+                # Remove last user message, so there isn't a double up
+                if conv.messages[-1][0] == conv.roles[0]:
                     conv.messages.pop()
-                    # Remove last user message, so there isn't a double up
-                    if conv.messages[-1][0] == conv.roles[0]:
-                        conv.messages.pop()
 
-                    reload_conv(conv)
+                reload_conv(conv)
+        torch.cuda.synchronize()
 
     except KeyboardInterrupt:
         print("exit...")
@@ -197,8 +132,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--conv-system-msg", type=str, default=None, help="Conversation system message."
     )
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--max-steps", type=int, default=512)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--max-steps", type=int, default=4096)
     parser.add_argument("--no-history", action="store_true")
     parser.add_argument(
         "--style",

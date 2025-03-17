@@ -16,6 +16,7 @@ from transformers import AutoTokenizer, AutoConfig
 import os
 from huggingface_hub import hf_hub_download
 import warnings
+import time
 
 class MedusaConfig(PretrainedConfig):
     """
@@ -32,6 +33,7 @@ class MedusaConfig(PretrainedConfig):
         self,
         medusa_num_heads=5,
         medusa_num_layers=1,
+        # base_model_name_or_path="/work1/deming/shared/meta-llama/medusa-Llama-3.1-405B",
         base_model_name_or_path="lmsys/vicuna-7b-v1.3",
         **kwargs,
     ):
@@ -113,8 +115,8 @@ class MedusaModelABC(nn.Module):
                 nn.Sequential(
                     *([ResBlock(self.hidden_size)] * medusa_num_layers),
                     nn.Linear(self.hidden_size, self.vocab_size, bias=False),
-                )
-                for _ in range(medusa_num_heads)
+                ).to(f"cuda:{x}")
+                for x in range(medusa_num_heads)
             ]
         )
     # Add a link named base_model to self
@@ -129,33 +131,51 @@ class MedusaModelABC(nn.Module):
         **kwargs,
     ):
         # Manually load config to ensure that the medusa_num_heads parameter is loaded
-        try:
-            config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
-            return super().from_pretrained(
-                pretrained_model_name_or_path,
-                *args,
-                **kwargs,
-                config=config,
-            )
-        except:
-            config = MedusaConfig.from_pretrained(pretrained_model_name_or_path)
-            base_model_config = AutoConfig.from_pretrained(config.base_model_name_or_path)
-            base_model_config.medusa_num_heads = 5 # TODO: fix the uploaded config (only include 2 heads)
-            base_model_config.medusa_num_layers = config.medusa_num_layers
-            model = super().from_pretrained(
-                config.base_model_name_or_path,
-                *args,
-                **kwargs,
-                config=base_model_config,
-            )
-            medusa_head_path = os.path.join(pretrained_model_name_or_path, "medusa_lm_head.pt")
-            if os.path.exists(medusa_head_path):
-                filename = medusa_head_path
-            else:
-                filename = hf_hub_download(pretrained_model_name_or_path, "medusa_lm_head.pt")
-            medusa_head_state_dict = torch.load(filename, map_location=model.device)
-            model.medusa_head.load_state_dict(medusa_head_state_dict, strict=False)
-            return model
+        # try:
+        #     config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
+        #     return super().from_pretrained(
+        #         pretrained_model_name_or_path,
+        #         *args,
+        #         **kwargs,
+        #         config=config,
+        #     )
+        # except:
+        config = MedusaConfig.from_pretrained(pretrained_model_name_or_path)
+        base_model_config = AutoConfig.from_pretrained(config.base_model_name_or_path)
+        base_model_config.medusa_num_heads = 5 # TODO: fix the uploaded config (only include 2 heads)
+        base_model_config.medusa_num_layers = config.medusa_num_layers
+        
+        model = super().from_pretrained(
+            config.base_model_name_or_path,
+            *args,
+            **kwargs,
+            config=base_model_config,
+        )
+    
+        from safetensors.torch import load_file
+        medusa_head_path = os.path.join(pretrained_model_name_or_path, "/work1/deming/shared/medusa-Llama-3.1-405B_medusa_mlp_Llama-3.1-405B_medusa_5_lr_3e-05_layers_1/medusa_lm_head.safetensors")
+
+        rank = int(os.environ["LOCAL_RANK"])
+        medusa_head_state_dict = load_file(medusa_head_path, device=f"cuda:0")
+        # Extract the subset of the state dictionary for the current rank
+        if rank < base_model_config.medusa_num_heads :
+            medusa_head_state_dict_rank = {
+                k.replace(f"{str(rank)}.0.", ""): v  # Remove the prefix (e.g., "0.0.")
+                for k, v in medusa_head_state_dict.items()
+                if k.startswith(f"{str(rank)}.0.")  # Filter keys for the current rank
+            }
+
+            # Move the parameters to the correct GPU
+            medusa_head_state_dict_rank = {
+                k: v.to(f"cuda:{str(rank)}")
+                for k, v in medusa_head_state_dict_rank.items()
+            }
+
+            # Load the state dict for the current medusa_head
+            model.medusa_head[rank].load_state_dict(medusa_head_state_dict_rank, strict=False)
+        
+       
+        return model
         
 
     def get_tokenizer(self):
@@ -191,38 +211,42 @@ class MedusaModelABC(nn.Module):
             torch.Tensor: A tensor containing predictions from all Medusa heads.
             (Optional) Original predictions from the base model's LM head.
         """
-        if not medusa_forward:
-            return super().forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                position_ids=position_ids,
-                **kwargs,
-            )
-        with torch.inference_mode():
-            # Pass input through the base model
-            outputs = self.base_model.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                position_ids=position_ids,
-                **kwargs,
-            )
-            if output_orig:
-                orig = self.base_model.lm_head(outputs[0])
-        # Clone the output hidden states
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        outputs = None
+        if local_rank == 0 :
+            if not medusa_forward:
+                return super().forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    position_ids=position_ids,
+                    **kwargs,
+                )
+            with torch.inference_mode():
+                # Pass input through the base model
+                outputs = self.base_model.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    position_ids=position_ids,
+                    **kwargs,
+                )
+                if output_orig:
+                    orig = self.base_model.lm_head(outputs[0])
+        if torch.distributed.is_initialized():
+            output_comm = [outputs]  # Wrap in a list for broadcasting
+            torch.distributed.broadcast_object_list(output_comm, src=0)
+            outputs = output_comm[0]  # Unwrap the list
+        
         hidden_states = outputs[0].clone()
-        medusa_logits = []
-        # TODO: Consider parallelizing this loop for efficiency?
-        for i in range(self.medusa):
-            medusa_logits.append(self.medusa_head[i](hidden_states))
+        medusa_logits = (self.medusa_head[local_rank](hidden_states))
         if output_orig:
             return torch.stack(medusa_logits, dim=0), outputs, orig
         return torch.stack(medusa_logits, dim=0)
     def get_medusa_choice(self, model_name):
         if 'vicuna' in model_name:
             if '7b' in model_name:
-                return vicuna_7b_stage2
+                return vicuna_7b_stage1
             elif '13b' in model_name:
                 return vicuna_13b_stage2
             elif '33b' in model_name:
@@ -311,6 +335,9 @@ class MedusaModelABC(nn.Module):
         new_token = 0
         last_round_token = 0
 
+        # torch.cuda.synchronize()
+        # start = time.time()
+
         for idx in range(max_steps):
             # Generate candidates with topk predictions from Medusa heads
             candidates, tree_candidates = generate_candidates(
@@ -367,6 +394,8 @@ class MedusaModelABC(nn.Module):
 
             if self.tokenizer.eos_token_id in input_ids[0, input_len:]:
                 break
+        # end = time.time()
+        # print(f"\nTotal time taken: {end-start:.3f}")
 
 
 class MedusaModelLlama(MedusaModelABC, KVLlamaForCausalLM):

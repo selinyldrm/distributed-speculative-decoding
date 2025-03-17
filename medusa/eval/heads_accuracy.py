@@ -96,7 +96,7 @@ if __name__ == "__main__":
                         help="Number of medusa heads.")
     parser.add_argument("--data_path", type=str, required=True,
                         help="Path to the evaluation data in JSON format.")
-    parser.add_argument("--save_dir", type=str, default="../../data",
+    parser.add_argument("--save_dir", type=str, default="./",
                         help="Directory to save the results.")
     parser.add_argument("--steps", type=int, default=20,
                         help="Number of steps to run the model.")
