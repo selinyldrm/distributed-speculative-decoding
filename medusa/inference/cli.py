@@ -21,11 +21,10 @@ from fastchat.serve.cli import SimpleChatIO, RichChatIO, ProgrammaticChatIO
 from fastchat.model.model_adapter import get_conversation_template
 from fastchat.conversation import get_conv_template
 import json
-from medusa.model.medusa_model import MedusaModel
+from medusa.model.medusa_model_legacy import MedusaModel
 # from needle_in_a_haystack.prompt import Prompter
 
-from transformers.integrations.deepspeed import HfDeepSpeedConfig
-import deepspeed
+
 
 def main(args):
     if args.style == "simple":
@@ -37,24 +36,28 @@ def main(args):
     else:
         raise ValueError(f"Invalid style for console: {args.style}")
     try:
+        from transformers.integrations.deepspeed import HfDeepSpeedConfig
+        import deepspeed
+        from transformers import AutoModelForCausalLM, AutoConfig
         ds_config =  "/work1/deming/seliny2/Medusa/deepspeed_config.json"
         hfdsc = HfDeepSpeedConfig(ds_config)
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
         world_size = int(os.getenv("WORLD_SIZE", "1"))
         torch.cuda.set_device(local_rank)
         deepspeed.init_distributed()
-        model = MedusaModel.from_pretrained(
-            args.model,
-            torch_dtype=torch.float16,
-            # low_cpu_mem_usage=True,
-            # device_map="auto", turn off for DEEPSPEED !!!
-            load_in_8bit=args.load_in_8bit,
-            load_in_4bit=args.load_in_4bit,
-            trust_remote_code=True,
+
+        medusa_lm_head = MedusaModel.from_pretrained(
+            "/work1/deming/shared/medusa-distributed-heads-Llama-3.1-405B_medusa_mlp_Llama-3.1-405B_medusa_5_lr_3e-05_layers_1",
+            "/work1/deming/shared/Llama-3.1-405B",
+            medusa_num_heads=5,
         )
-        ds_engine = deepspeed.initialize(model=model, config_params=ds_config)[0]
-        ds_engine.module.eval()
-        model = ds_engine.module
+        print("distributing medusa heads...")
+        head_engine = deepspeed.initialize(
+            config="/work1/deming/seliny2/Medusa/deepspeed_config.json",
+            model=medusa_lm_head)[0]
+        model = head_engine.module
+        print("distributed medusa heads...")
+
         tokenizer = model.get_tokenizer()
         conv = None
 
@@ -74,43 +77,35 @@ def main(args):
         if not conv:
             conv = new_chat()
 
-        inp = None
-        if local_rank == 0:
-            inp = chatio.prompt_for_input(conv.roles[0])
+        # inp = None
+        # if local_rank == 0:
+        inp = chatio.prompt_for_input(conv.roles[0])
 
-        if torch.distributed.is_initialized():  # Ensure distributed is initialized
-            inp = [inp]  # Wrap in a list to make it compatible with broadcast
-            torch.distributed.broadcast_object_list(inp, src=0)
-            inp = inp[0]  # Unwrap the list
-            
-        torch.cuda.synchronize()
+        # if torch.distributed.is_initialized():  # Ensure distributed is initialized
+        #     inp = [inp]  # Wrap in a list to make it compatible with broadcast
+        #     torch.distributed.broadcast_object_list(inp, src=0)
+        #     inp = inp[0]  # Unwrap the list
+        # torch.cuda.synchronize()
+        
         conv.append_message(conv.roles[0], inp)
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
-        try:
-            chatio.prompt_for_output(conv.roles[1])
-            input_ids = tokenizer.encode(prompt, return_tensors="pt").to(
-                model.base_model.device
+        # if local_rank == 0:
+        #     chatio.prompt_for_output(conv.roles[1])
+        chatio.prompt_for_output(conv.roles[1])
+        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(
+            model.base_model.device
+        )
+        outputs = chatio.stream_output(
+            model.medusa_generate(
+                input_ids,
+                temperature=args.temperature,
+                max_steps=args.max_steps,
             )
-            outputs = chatio.stream_output(
-                model.medusa_generate(
-                    input_ids,
-                    temperature=args.temperature,
-                    max_steps=args.max_steps,
-                )
-            )
-            conv.update_last_message(outputs.strip())
-        except KeyboardInterrupt:
-            print("stopped generation.")
-            # If generation didn't finish
-            if conv.messages[-1][1] is None:
-                conv.messages.pop()
-                # Remove last user message, so there isn't a double up
-                if conv.messages[-1][0] == conv.roles[0]:
-                    conv.messages.pop()
-
-                reload_conv(conv)
+        )
+        conv.update_last_message(outputs.strip())
+       
         torch.cuda.synchronize()
 
     except KeyboardInterrupt:

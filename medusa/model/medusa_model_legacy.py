@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel, PretrainedConfig
-from .modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
-from .utils import *
+from .modeling_llama_kv_legacy import LlamaForCausalLM as KVLlamaForCausalLM
+from .utils_legacy import *
 from .kv_cache import initialize_past_key_values
 from .medusa_choices import mc_sim_7b_63
 from transformers import AutoTokenizer
@@ -153,24 +153,27 @@ class MedusaModel(nn.Module):
             medusa_config.medusa_num_layers,
             medusa_config.base_model_name_or_path,
         )
-        medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.pt")
-        if os.path.exists(medusa_head_path):
-            filename = medusa_head_path
-        else:
-            filename = hf_hub_download(medusa_head_name_or_path, "medusa_lm_head.pt")
-        medusa_head_state_dict = torch.load(filename, map_location=base_model.device)
+        # medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.pt")
+        from safetensors.torch import load_file
+        medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.safetensors")
+        medusa_head_state_dict = load_file(medusa_head_path)
+        # if os.path.exists(medusa_head_path):
+        #     filename = medusa_head_path
+        # else:
+        #     filename = hf_hub_download(medusa_head_name_or_path, "medusa_lm_head.pt")
+        # medusa_head_state_dict = torch.load(filename, map_location=base_model.device)
         model.medusa_head.load_state_dict(medusa_head_state_dict, strict=False)
 
         return model
-
+    
     def forward(
         self,
         input_ids=None,
         attention_mask=None,
-        labels=None,
         past_key_values=None,
         output_orig=False,
         position_ids=None,
+        medusa_forward=False,
     ):
         """Forward pass of the MedusaModel.
 

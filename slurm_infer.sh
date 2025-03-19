@@ -21,8 +21,9 @@ export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=1
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+unset PYTHONPATH
 export PYTHONPATH=$PYTHONPATH:/work1/deming/seliny2/Medusa
 ulimit -n 65536
 # torchrun python3 -m medusa.inference.cli --model ../../shared/medusa-Llama-3.1-405B_medusa_mlp_Llama-3.1-405B_medusa_5_lr_3e-05_layers_1
 accelerate launch --config_file /work1/deming/shared/.cache/huggingface/accelerate/default_config.yaml ./medusa/inference/cli.py \
-    --model /work1/deming/shared/medusa-Llama-3.1-405B_medusa_mlp_Llama-3.1-405B_medusa_5_lr_3e-05_layers_1
+    --model /work1/deming/shared/medusa-distributed-heads-Llama-3.1-405B_medusa_mlp_Llama-3.1-405B_medusa_5_lr_3e-05_layers_1

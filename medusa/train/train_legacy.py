@@ -427,7 +427,13 @@ def train():
         medusa_num_layers=training_args.medusa_num_layers,
         base_model_name_or_path=model_args.model_name_or_path,
     )
+    print("distributing medusa heads...")
+    head_engine = deepspeed.initialize(
+        config="/work1/deming/seliny2/axolotl/deepspeed/zero3-offload.json",
+        model=medusa_lm_head)[0]
+    medusa_lm_head = head_engine.module
 
+    print("distributed medusa heads.")
     # Generate Medusa config for pushing to HF hub
     medusa_config = MedusaConfig(
         medusa_num_heads=training_args.medusa_num_heads,

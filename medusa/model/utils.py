@@ -143,17 +143,10 @@ def initialize_medusa(input_ids, model, medusa_attn_mask, past_key_values):
     - medusa_logits (torch.Tensor): Logits from the Medusa heads.
     - logits (torch.Tensor): Original logits from the base model.
     """
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
-    
-    output_list = [torch.empty_like(input_ids) for _ in range(5)]
-    torch.distributed.all_gather(output_list, input_ids)
-    all_input_ids = torch.cat(output_list, dim=0)
-    if local_rank == 0 :
-        medusa_logits, outputs, logits = model(
-            all_input_ids, past_key_values=past_key_values, output_orig=True, medusa_forward=True
-        )
-        model.base_model.model.medusa_mask = medusa_attn_mask
+    medusa_logits, outputs, logits = model(
+        input_ids, past_key_values=past_key_values, output_orig=True, medusa_forward=True
+    )
+    model.base_model.model.medusa_mask = medusa_attn_mask
     return medusa_logits, logits
 
 
