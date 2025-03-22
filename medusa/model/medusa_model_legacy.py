@@ -8,6 +8,7 @@ from .medusa_choices import mc_sim_7b_63
 from transformers import AutoTokenizer
 import os
 from huggingface_hub import hf_hub_download
+import time
 
 
 class MedusaConfig(PretrainedConfig):
@@ -163,6 +164,9 @@ class MedusaModel(nn.Module):
         #     filename = hf_hub_download(medusa_head_name_or_path, "medusa_lm_head.pt")
         # medusa_head_state_dict = torch.load(filename, map_location=base_model.device)
         model.medusa_head.load_state_dict(medusa_head_state_dict, strict=False)
+        for idx, module in enumerate(model.medusa_head):
+                layer_device = next(module.parameters()).device
+                print(f"Layer {idx} is on device: {layer_device}")
 
         return model
     
@@ -214,6 +218,7 @@ class MedusaModel(nn.Module):
     def medusa_generate(
         self,
         input_ids,
+        wall_time,
         attention_mask=None,
         temperature=0.0,
         max_steps=512,
@@ -241,46 +246,34 @@ class MedusaModel(nn.Module):
         # Avoid modifying the input_ids in-place
         input_ids = input_ids.clone()
 
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        torch.cuda.set_device(local_rank)
+
         # Cache medusa buffers (the fixed patterns for tree attention)
-        if hasattr(self, "medusa_choices") and self.medusa_choices == medusa_choices:
-            # Load the cached medusa buffer
-            medusa_buffers = self.medusa_buffers
-        else:
-            # Initialize the medusa buffer
-            medusa_buffers = generate_medusa_buffers(
+        medusa_buffers = generate_medusa_buffers(
                 medusa_choices, device=self.base_model.device
             )
-        self.medusa_buffers = medusa_buffers
-        self.medusa_choices = medusa_choices
+        medusa_buffers = medusa_buffers
+        medusa_choices = medusa_choices
 
-
-        # Initialize the past key and value states
-        if hasattr(self, "past_key_values"):
-            past_key_values = self.past_key_values
-            past_key_values_data = self.past_key_values_data
-            current_length_data = self.current_length_data
-            # Reset the past key and value states
-            current_length_data.zero_()
-        else:
-            (
-                past_key_values,
-                past_key_values_data,
-                current_length_data,
-            ) = initialize_past_key_values(self.base_model)
-            self.past_key_values = past_key_values
-            self.past_key_values_data = past_key_values_data
-            self.current_length_data = current_length_data
-
+        (
+            past_key_values,
+            past_key_values_data,
+            current_length_data,
+        ) = initialize_past_key_values(self.base_model)
+        
         input_len = input_ids.shape[1]
 
-        reset_medusa_mode(self)
+        self.base_model.model.medusa_mask = medusa_buffers["medusa_attn_mask"]
         # Initialize tree attention mask and process prefill tokens
         medusa_logits, logits = initialize_medusa(
             input_ids, self, medusa_buffers["medusa_attn_mask"], past_key_values
         )
 
         new_token = 0
-        last_round_token = 0
+
+        torch.cuda.synchronize(device=f"cuda:{local_rank}")
+        start_time = time.time()
 
         for idx in range(max_steps):
             # Generate candidates with topk predictions from Medusa heads
@@ -321,14 +314,12 @@ class MedusaModel(nn.Module):
                 current_length_data,
             )
 
-            yield {
-                "text": self.tokenizer.decode(
-                    input_ids[0, input_len:],
-                    skip_special_tokens=True,
-                    spaces_between_special_tokens=False,
-                    clean_up_tokenization_spaces=True,
-                )
-            }
-
-            if self.tokenizer.eos_token_id in input_ids[0, input_len:]:
+            if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
                 break
+            if new_token > 1024:
+                break
+
+        torch.cuda.synchronize(device=f"cuda:{local_rank}")
+        total_time = time.time() - start_time
+        wall_time.append(total_time)
+        return input_ids, new_token

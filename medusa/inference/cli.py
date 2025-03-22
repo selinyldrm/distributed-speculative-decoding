@@ -46,17 +46,30 @@ def main(args):
         torch.cuda.set_device(local_rank)
         deepspeed.init_distributed()
 
-        medusa_lm_head = MedusaModel.from_pretrained(
-            "/work1/deming/shared/medusa-distributed-heads-Llama-3.1-405B_medusa_mlp_Llama-3.1-405B_medusa_5_lr_3e-05_layers_1",
-            "/work1/deming/shared/Llama-3.1-405B",
+        model = MedusaModel.from_pretrained(
+            args.model,
+            args.base_model,
             medusa_num_heads=5,
+            torch_dtype=torch.float16,
         )
-        print("distributing medusa heads...")
-        head_engine = deepspeed.initialize(
-            config="/work1/deming/seliny2/Medusa/deepspeed_config.json",
-            model=medusa_lm_head)[0]
-        model = head_engine.module
-        print("distributed medusa heads...")
+        # model.base_model.model.medusa_mask = {}
+        # model.base_model.model.medusa_mask[local_rank] = None
+        # model.medusa_buffers = {}
+        # model.medusa_buffers[local_rank] = None
+        # model.medusa_choices = {}
+        # model.medusa_choices[local_rank] = None
+        # model.past_key_values = {}
+        # model.past_key_values[local_rank] = None
+        # model.past_key_values_data = {}
+        # model.past_key_values_data[local_rank] = None
+        # model.current_length_data = {}
+        # model.current_length_data[local_rank] = None
+
+        model_engine = deepspeed.initialize(
+            config=ds_config,
+            model=model,
+            model_parameters=model.parameters())[0]
+        model = model_engine.module
 
         tokenizer = model.get_tokenizer()
         conv = None
@@ -72,42 +85,94 @@ def main(args):
                 chatio.prompt_for_output(message[0])
                 chatio.print_output(message[1])
 
+        from fastchat.llm_judge.common import load_questions, temperature_config
+        from fastchat.model import load_model, get_conversation_template
+        from tqdm import tqdm 
+
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        question_file = f"./llm_judge/data/mt_bench/question.jsonl"
+        answer_file = f"./llm_judge/data/mt_bench/" + os.path.basename(args.model) + f"/{timestamp}/model_answer/"
+        os.makedirs(answer_file, exist_ok=True)
+        answer_file += f"{local_rank}.jsonl"
+        questions = load_questions(question_file, None, None)
         # while True:
         
         if not conv:
             conv = new_chat()
+        for question in tqdm(questions):
+            if question["category"] in temperature_config:
+                temperature = temperature_config[question["category"]]
+            else:
+                temperature = 0.7
 
-        # inp = None
-        # if local_rank == 0:
-        inp = chatio.prompt_for_input(conv.roles[0])
+            choices = []
+            num_choices = 1
+            for i in range(num_choices):
+                torch.manual_seed(i)
+                conv = get_conversation_template(args.base_model)
+                turns = []
+                new_tokens = []
+                wall_time = []
+                for j in range(len(question["turns"])):
+                    qs = question["turns"][j]
+                    conv.append_message(conv.roles[0], qs)
+                    conv.append_message(conv.roles[1], None)
+                    prompt = conv.get_prompt()
 
-        # if torch.distributed.is_initialized():  # Ensure distributed is initialized
-        #     inp = [inp]  # Wrap in a list to make it compatible with broadcast
-        #     torch.distributed.broadcast_object_list(inp, src=0)
-        #     inp = inp[0]  # Unwrap the list
-        # torch.cuda.synchronize()
-        
-        conv.append_message(conv.roles[0], inp)
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
+                    input_ids = tokenizer([prompt]).input_ids
+                    chatio.prompt_for_output(conv.roles[1])
+                    print(f"Rank {local_rank} is starting generation...", flush=True)
+                    outputs, tokens = model.medusa_generate(
+                            torch.as_tensor(input_ids).to(f"cuda:{local_rank}"),
+                            wall_time,
+                            temperature=temperature,
+                            max_steps=args.max_steps
+                        )
+                    print(f"Rank {local_rank} generated.", flush=True)
+                    
+                    outputs = outputs[0][len(input_ids[0]) :]
+                    # be consistent with the template's stop_token_ids
+                    if conv.stop_token_ids:
+                        stop_token_ids_index = [
+                            i
+                            for i, id in enumerate(outputs)
+                            if id in conv.stop_token_ids
+                        ]
+                        if len(stop_token_ids_index) > 0:
+                            outputs = outputs[: stop_token_ids_index[0]]
 
-        # if local_rank == 0:
-        #     chatio.prompt_for_output(conv.roles[1])
-        chatio.prompt_for_output(conv.roles[1])
-        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(
-            model.base_model.device
-        )
-        outputs = chatio.stream_output(
-            model.medusa_generate(
-                input_ids,
-                temperature=args.temperature,
-                max_steps=args.max_steps,
-            )
-        )
-        conv.update_last_message(outputs.strip())
+                    output = tokenizer.decode(
+                        outputs,
+                        spaces_between_special_tokens=False,
+                    )
+                    if conv.stop_str and output.find(conv.stop_str) > 0:
+                        output = output[: output.find(conv.stop_str)]
+                    for special_token in tokenizer.special_tokens_map.values():
+                        if isinstance(special_token, list):
+                            for special_tok in special_token:
+                                output = output.replace(special_tok, "")
+                        else:
+                            output = output.replace(special_token, "")
+                    output = output.strip()
+                    print(output)
+                
+                turns.append(output)
+                new_tokens.append(int(tokens))
+                conv.messages[-1][-1] = output
+            choices.append({"index": i, "turns": turns, "new_tokens": new_tokens, "wall_time": wall_time})
+           
+
+        # Dump answers
+        os.makedirs(os.path.dirname(answer_file), exist_ok=True)
+        with open(os.path.expanduser(answer_file), "a") as fout:
+            ans_json = {
+                "question_id": question["question_id"],
+                "choices": choices,
+            }
+            fout.write(json.dumps(ans_json) + "\n")
+        print("Model eval done...", flush=True)
        
-        torch.cuda.synchronize()
-
     except KeyboardInterrupt:
         print("exit...")
 
@@ -115,6 +180,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True, help="Model name or path.")
+    parser.add_argument("--base_model", type=str, required=True, help="Base model name or path.")
     parser.add_argument(
         "--load-in-8bit", action="store_true", help="Use 8-bit quantization"
     )
@@ -128,7 +194,7 @@ if __name__ == "__main__":
         "--conv-system-msg", type=str, default=None, help="Conversation system message."
     )
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--max-steps", type=int, default=4096)
+    parser.add_argument("--max-steps", type=int, default=512)
     parser.add_argument("--no-history", action="store_true")
     parser.add_argument(
         "--style",

@@ -184,10 +184,6 @@ class MedusaModelABC(nn.Module):
                 layer_device = next(module.parameters()).device
                 print(f"Layer {idx} is on device: {layer_device}")
 
-            # medusa_head_engine = deepspeed.initialize(model=model.medusa_head, config_params=ds_config)[0]
-            # medusa_head_engine.module.eval()
-            # model.medusa_head = medusa_head_engine.module
-
             return model
         
 

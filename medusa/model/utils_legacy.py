@@ -146,6 +146,9 @@ def initialize_medusa(input_ids, model, medusa_attn_mask, past_key_values):
         input_ids, past_key_values=past_key_values, output_orig=True, medusa_forward=True
     )
     model.base_model.model.medusa_mask = medusa_attn_mask
+    # import os
+    # local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    # model.base_model.model.medusa_mask[local_rank] = medusa_attn_mask # important fix on distributed medusa
     return medusa_logits, logits
 
 

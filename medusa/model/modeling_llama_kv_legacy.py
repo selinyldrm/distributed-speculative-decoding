@@ -913,7 +913,11 @@ class LlamaModel(LlamaPreTrainedModel):
             )
 
         # [MODIFIED] add medusa mask
-        if hasattr(self, "medusa_mask") and self.medusa_mask is not None:
+        # import os
+        # local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        # if hasattr(self, "medusa_mask") and local_rank in self.medusa_mask and self.medusa_mask is not None:
+        #     medusa_mask = self.medusa_mask[local_rank]
+        if hasattr(self, "medusa_mask")  and  self.medusa_mask is not None:
             medusa_mask = self.medusa_mask
             medusa_len = medusa_mask.size(-1)
             combined_attention_mask[:, :, -medusa_len:, -medusa_len:][

@@ -19,66 +19,147 @@ from fastchat.model import load_model, get_conversation_template
 import transformers
 
 
-from medusa.model.utils import *
-from medusa.model.medusa_model import MedusaModel
+from medusa.model.utils_legacy import *
+from medusa.model.medusa_model_legacy import MedusaModel
 from medusa.model.kv_cache import initialize_past_key_values
 from medusa.model.medusa_choices import *
 
+# def medusa_forward(input_ids, model, tokenizer, medusa_choices, temperature, posterior_threshold, posterior_alpha, max_steps = 512):
+#     assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
+#     # Avoid modifying the input_ids in-place
+#     input_ids = input_ids.clone()
+
+#     # Cache medusa buffers (the fixed patterns for tree attention)
+#     if hasattr(model, "medusa_choices") and model.medusa_choices == medusa_choices:
+#         # Load the cached medusa buffer
+#         medusa_buffers = model.medusa_buffers
+#     else:
+#         # Initialize the medusa buffer
+#         medusa_buffers = generate_medusa_buffers(
+#             medusa_choices, device=model.base_model.device
+#         )
+#     model.medusa_buffers = medusa_buffers
+#     model.medusa_choices = medusa_choices
+
+#     # Initialize the past key and value states
+#     if hasattr(model, "past_key_values"):
+#         past_key_values = model.past_key_values
+#         past_key_values_data = model.past_key_values_data
+#         current_length_data = model.current_length_data
+#         # Reset the past key and value states
+#         current_length_data.zero_()
+#     else:
+#         (
+#             past_key_values,
+#             past_key_values_data,
+#             current_length_data,
+#         ) = initialize_past_key_values(model.base_model)
+#         model.past_key_values = past_key_values
+#         model.past_key_values_data = past_key_values_data
+#         model.current_length_data = current_length_data
+
+#     input_len = input_ids.shape[1]
+#     medusa_logits, logits = initialize_medusa(
+#             input_ids, model, medusa_buffers["medusa_attn_mask"], past_key_values
+#     )
+#     new_token = 0
+
+#     torch.cuda.synchronize()
+#     start_time = time.time()
+
+#     for idx in range(max_steps): 
+#         candidates, tree_candidates = generate_candidates(
+#                 medusa_logits,
+#                 logits,
+#                 medusa_buffers["tree_indices"],
+#                 medusa_buffers["retrieve_indices"],
+#             )
+#         medusa_logits, logits, outputs = tree_decoding(
+#                 model,
+#                 tree_candidates,
+#                 past_key_values,
+#                 medusa_buffers["medusa_position_ids"],
+#                 input_ids,
+#                 medusa_buffers["retrieve_indices"],
+#             )
+#         best_candidate, accept_length = evaluate_posterior(
+#                 logits, candidates, temperature, posterior_threshold, posterior_alpha
+#             )
+#         input_ids, logits, medusa_logits, new_token = update_inference_inputs(
+#                 input_ids,
+#                 candidates,
+#                 best_candidate,
+#                 accept_length,
+#                 medusa_buffers["retrieve_indices"],
+#                 outputs,
+#                 logits,
+#                 medusa_logits,
+#                 new_token,
+#                 past_key_values_data,
+#                 current_length_data,
+#             )
+#         if tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+#             break
+#         if new_token > 1024:
+#             break
+#     torch.cuda.synchronize()
+#     total_time = time.time() - start_time
+#     return input_ids, new_token, idx, total_time
+
 def medusa_forward(input_ids, model, tokenizer, medusa_choices, temperature, posterior_threshold, posterior_alpha, max_steps = 512):
-    assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
+    # assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
+
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    torch.cuda.set_device(local_rank)
     # Avoid modifying the input_ids in-place
     input_ids = input_ids.clone()
 
-    # Cache medusa buffers (the fixed patterns for tree attention)
-    if hasattr(model, "medusa_choices") and model.medusa_choices == medusa_choices:
-        # Load the cached medusa buffer
-        medusa_buffers = model.medusa_buffers
-    else:
-        # Initialize the medusa buffer
-        medusa_buffers = generate_medusa_buffers(
-            medusa_choices, device=model.base_model.device
-        )
-    model.medusa_buffers = medusa_buffers
-    model.medusa_choices = medusa_choices
 
-    # Initialize the past key and value states
-    if hasattr(model, "past_key_values"):
-        past_key_values = model.past_key_values
-        past_key_values_data = model.past_key_values_data
-        current_length_data = model.current_length_data
-        # Reset the past key and value states
-        current_length_data.zero_()
-    else:
+    if model.medusa_choices[local_rank] is  None or model.base_model.model.medusa_mask[local_rank] is None or model.medusa_choices[local_rank] is None:
+        medusa_buffers = generate_medusa_buffers(
+                medusa_choices, device=f"cuda:{local_rank}"
+            )
+        model.medusa_buffers[local_rank] = medusa_buffers
+        model.medusa_choices[local_rank] = medusa_choices
+        model.base_model.model.medusa_mask[local_rank] = medusa_buffers["medusa_attn_mask"]
+        
+
+    if model.past_key_values[local_rank] is None or model.past_key_values_data[local_rank] is None or model.current_length_data[local_rank] is None:
         (
             past_key_values,
             past_key_values_data,
             current_length_data,
         ) = initialize_past_key_values(model.base_model)
-        model.past_key_values = past_key_values
-        model.past_key_values_data = past_key_values_data
-        model.current_length_data = current_length_data
+        model.past_key_values[local_rank] = past_key_values
+        model.past_key_values_data[local_rank] = past_key_values_data
+        model.current_length_data[local_rank] = current_length_data
 
     input_len = input_ids.shape[1]
-    reset_medusa_mode(model)
+    print(f"Initializing Medusa logits at {local_rank}")
+    
     medusa_logits, logits = initialize_medusa(
-            input_ids, model, medusa_buffers["medusa_attn_mask"], past_key_values
+            input_ids, model, model.medusa_buffers[local_rank]["medusa_attn_mask"], model.past_key_values[local_rank]
     )
     new_token = 0
+    print(f"Starting iterative Medusa generation at {local_rank}")
     
+    torch.cuda.synchronize(device=f"cuda:{local_rank}")
+    start_time = time.time()
     for idx in range(max_steps): 
         candidates, tree_candidates = generate_candidates(
                 medusa_logits,
                 logits,
-                medusa_buffers["tree_indices"],
-                medusa_buffers["retrieve_indices"],
+                model.medusa_buffers[local_rank]["tree_indices"],
+                model.medusa_buffers[local_rank]["retrieve_indices"],
             )
         medusa_logits, logits, outputs = tree_decoding(
                 model,
                 tree_candidates,
-                past_key_values,
-                medusa_buffers["medusa_position_ids"],
+                model.past_key_values[local_rank],
+                model.medusa_buffers[local_rank]["medusa_position_ids"],
                 input_ids,
-                medusa_buffers["retrieve_indices"],
+                model.medusa_buffers[local_rank]["retrieve_indices"],
             )
         best_candidate, accept_length = evaluate_posterior(
                 logits, candidates, temperature, posterior_threshold, posterior_alpha
@@ -88,19 +169,21 @@ def medusa_forward(input_ids, model, tokenizer, medusa_choices, temperature, pos
                 candidates,
                 best_candidate,
                 accept_length,
-                medusa_buffers["retrieve_indices"],
+                model.medusa_buffers[local_rank]["retrieve_indices"],
                 outputs,
                 logits,
                 medusa_logits,
                 new_token,
-                past_key_values_data,
-                current_length_data,
+                model.past_key_values_data[local_rank],
+                model.current_length_data[local_rank],
             )
         if tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
             break
         if new_token > 1024:
             break
-    return input_ids, new_token, idx
+    torch.cuda.synchronize(device=f"cuda:{local_rank}")
+    total_time = time.time() - start_time
+    return input_ids, new_token, idx, total_time
 
 def run_eval(
     model_path,
@@ -119,6 +202,9 @@ def run_eval(
     posterior_alpha,
     medusa_choices,
 ):
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    torch.cuda.set_device(local_rank)
     questions = load_questions(question_file, question_begin, question_end)
     # random shuffle the questions to balance the loading
     # random.shuffle(questions)
@@ -128,14 +214,14 @@ def run_eval(
 
     # Split the question file into `num_gpus` files
     assert num_gpus_total % num_gpus_per_model == 0
-    use_ray = num_gpus_total // num_gpus_per_model > 1
+    # use_ray = num_gpus_total // num_gpus_per_model > 1
 
-    if use_ray:
-        get_answers_func = ray.remote(num_gpus=num_gpus_per_model)(
-            get_model_answers
-        ).remote
-    else:
-        get_answers_func = get_model_answers
+    # if use_ray:
+    #     get_answers_func = ray.remote(num_gpus=num_gpus_per_model)(
+    #         get_model_answers
+    #     ).remote
+    # else:
+    get_answers_func = get_model_answers
 
     chunk_size = len(questions) // (num_gpus_total // num_gpus_per_model) # // 2
     ans_handles = []
@@ -157,8 +243,8 @@ def run_eval(
             )
         )
 
-    if use_ray:
-        ray.get(ans_handles)
+    # if use_ray:
+    #     ray.get(ans_handles)
 
 
 @torch.inference_mode()
@@ -180,23 +266,55 @@ def get_model_answers(
     # Medusa model setup
     num_heads = 4
 
+    from transformers.integrations.deepspeed import HfDeepSpeedConfig
+    import deepspeed
+    
+    from transformers import AutoModelForCausalLM, AutoConfig
+    ds_config =  "/work1/deming/seliny2/Medusa/deepspeed_config.json"
+    hfdsc = HfDeepSpeedConfig(ds_config)
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    torch.cuda.set_device(local_rank)
+    deepspeed.init_distributed()
+    answer_file += f"llama-{local_rank}.jsonl"
+
+    base_model = model_id
+    config = AutoConfig.from_pretrained(base_model)
     model = MedusaModel.from_pretrained(
         model_path,
-        medusa_num_heads = num_heads,
+        base_model,
+        medusa_num_heads=5,
         torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        device_map="auto"
     )
+    model.base_model.model.medusa_mask = {}
+    model.base_model.model.medusa_mask[local_rank] = None
+    model.medusa_buffers = {}
+    model.medusa_buffers[local_rank] = None
+    model.medusa_choices = {}
+    model.medusa_choices[local_rank] = None
+    model.past_key_values = {}
+    model.past_key_values[local_rank] = None
+    model.past_key_values_data = {}
+    model.past_key_values_data[local_rank] = None
+    model.current_length_data = {}
+    model.current_length_data[local_rank] = None
+
+    model_engine = deepspeed.initialize(
+        config="/work1/deming/seliny2/Medusa/deepspeed_config.json",
+        model=model)[0]
+    model = model_engine.module
+
+    # model = MedusaModel.from_pretrained(
+    #     model_path,
+    #     medusa_num_heads = num_heads,
+    #     torch_dtype=torch.float16,
+    #     low_cpu_mem_usage=True,
+    #     device_map="auto"
+    # )
 
     tokenizer = model.get_tokenizer()
-    
-    model.eval()
-    print('Check model training state:',model.training)
-    
-    cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
-    print('CUDA VISIBLE DEVICES:', cuda_visible_devices)
-    
     question = questions[0]
+    print("starting cache warmup...", flush=True)
 
     # warmup
     for _ in range(3):
@@ -220,10 +338,10 @@ def get_model_answers(
 
             # some models may error out when generating long outputs
             try:
-                torch.cuda.synchronize()
-                start_time = time.time()
-                output_ids, new_token, idx = medusa_forward(
-                    torch.as_tensor(input_ids).cuda(),
+                # torch.cuda.synchronize(device=f"cuda:{local_rank}")
+                # start_time = time.time()
+                output_ids, new_token, idx, total_time = medusa_forward(
+                    torch.as_tensor(input_ids).to(f"cuda:{local_rank}"),
                     model,
                     tokenizer,
                     medusa_choices,
@@ -231,8 +349,8 @@ def get_model_answers(
                     posterior_threshold,
                     posterior_alpha,
                 )
-                torch.cuda.synchronize()
-                total_time = time.time() - start_time
+                # torch.cuda.synchronize(device=f"cuda:{local_rank}")
+                # total_time = time.time() - start_time
                 output_ids = output_ids[0][len(input_ids[0]) :]
                 # be consistent with the template's stop_token_ids
                 if conv.stop_token_ids:
@@ -261,7 +379,7 @@ def get_model_answers(
                 if conv.name == "xgen" and output.startswith("Assistant:"):
                     output = output.replace("Assistant:", "", 1).strip()
             except RuntimeError as e:
-                print("ERROR question ID: ", question["question_id"])
+                print("ERROR question ID: ", question["question_id"], flush=True)
                 output = "ERROR"
 
             turns.append(output)
@@ -269,9 +387,9 @@ def get_model_answers(
             new_tokens.append(int(new_token))
             wall_time.append(total_time)
             conv.messages[-1][-1] = output
-    print('Warmup done')
+    print('Warmup done', flush=True)
 
-
+    # print('Warmup skipped', flush=True)
     for question in tqdm(questions):
         if question["category"] in temperature_config:
             temperature = temperature_config[question["category"]]
@@ -300,10 +418,10 @@ def get_model_answers(
 
                 # some models may error out when generating long outputs
                 try:
-                    torch.cuda.synchronize()
-                    start_time = time.time()
-                    output_ids, new_token, idx = medusa_forward(
-                        torch.as_tensor(input_ids).cuda(),
+                    # torch.cuda.synchronize(device=f"cuda:{local_rank}")
+                    print('medusa_forward starting', flush=True)
+                    output_ids, new_token, idx, total_time = medusa_forward(
+                        torch.as_tensor(input_ids).to(f"cuda:{local_rank}"),
                         model,
                         tokenizer,
                         medusa_choices,
@@ -311,8 +429,7 @@ def get_model_answers(
                         posterior_threshold,
                         posterior_alpha,
                     )
-                    torch.cuda.synchronize()
-                    total_time = time.time() - start_time
+                    # torch.cuda.synchronize(device=f"cuda:{local_rank}")
                     # if model.config.is_encoder_decoder:
                     #     output_ids = output_ids[0]
                     # else:
@@ -342,10 +459,8 @@ def get_model_answers(
                             output = output.replace(special_token, "")
                     output = output.strip()
 
-                    if conv.name == "xgen" and output.startswith("Assistant:"):
-                        output = output.replace("Assistant:", "", 1).strip()
                 except RuntimeError as e:
-                    print("ERROR question ID: ", question["question_id"])
+                    print("ERROR question ID: ", question["question_id"], flush=True)
                     output = "ERROR"
 
                 turns.append(output)
@@ -367,6 +482,7 @@ def get_model_answers(
                 "tstamp": time.time(),
             }
             fout.write(json.dumps(ans_json) + "\n")
+        print("Model eval done...", flush=True)
 
 
 def reorg_answer_file(answer_file):
@@ -468,20 +584,20 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    args.model_id = args.model_id+"-temperature-"+str(args.temperature)+"-posterior_threshold-"+str(args.posterior_threshold)+"-posterior_alpha-"+str(args.posterior_alpha)
+    # args.model_id = args.model_id+"-temperature-"+str(args.temperature)+"-posterior_threshold-"+str(args.posterior_threshold)+"-posterior_alpha-"+str(args.posterior_alpha)
     args.medusa_choices = eval(args.medusa_choices)
-    if args.num_gpus_total // args.num_gpus_per_model > 1:
-        import ray
+    # if args.num_gpus_total // args.num_gpus_per_model > 1:
+    #     import ray
 
-        ray.init()
+    #     ray.init()
 
     question_file = f"data/{args.bench_name}/question.jsonl"
-    if args.answer_file:
-        answer_file = args.answer_file
-    else:
-        answer_file = f"data/{args.bench_name}/model_answer/{args.model_id}.jsonl"
+    # if args.answer_file:
+    #     answer_file = args.answer_file
+    # else:
+    answer_file = f"data/{args.bench_name}/model_answer/"
 
-    print(f"Output to {answer_file}")
+    print(f"Output to {answer_file}", flush=True)
 
     run_eval(
         args.model_path,
@@ -501,5 +617,6 @@ if __name__ == "__main__":
         args.posterior_alpha,
         args.medusa_choices,
     )
+    print("Benchmark reorganizing answers...", flush=True)
 
     reorg_answer_file(answer_file)
