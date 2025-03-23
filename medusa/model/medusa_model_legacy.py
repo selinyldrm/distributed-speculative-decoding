@@ -154,15 +154,15 @@ class MedusaModel(nn.Module):
             medusa_config.medusa_num_layers,
             medusa_config.base_model_name_or_path,
         )
-        # medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.pt")
-        from safetensors.torch import load_file
-        medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.safetensors")
-        medusa_head_state_dict = load_file(medusa_head_path)
-        # if os.path.exists(medusa_head_path):
-        #     filename = medusa_head_path
-        # else:
-        #     filename = hf_hub_download(medusa_head_name_or_path, "medusa_lm_head.pt")
-        # medusa_head_state_dict = torch.load(filename, map_location=base_model.device)
+        medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.pt")
+        # from safetensors.torch import load_file
+        # medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.safetensors")
+        # medusa_head_state_dict = load_file(medusa_head_path)
+        if os.path.exists(medusa_head_path):
+            filename = medusa_head_path
+        else:
+            filename = hf_hub_download(medusa_head_name_or_path, "medusa_lm_head.pt")
+        medusa_head_state_dict = torch.load(filename, map_location=base_model.device)
         model.medusa_head.load_state_dict(medusa_head_state_dict, strict=False)
         for idx, module in enumerate(model.medusa_head):
                 layer_device = next(module.parameters()).device
@@ -218,10 +218,9 @@ class MedusaModel(nn.Module):
     def medusa_generate(
         self,
         input_ids,
-        wall_time,
         attention_mask=None,
         temperature=0.0,
-        max_steps=512,
+        max_steps=32,
         # The hyperparameters below are for the Medusa
         # top-1 prediciton for the next token, top-7 predictions for the next token, top-6 predictions for the next next token.
         medusa_choices=mc_sim_7b_63,
@@ -248,56 +247,74 @@ class MedusaModel(nn.Module):
 
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
         torch.cuda.set_device(local_rank)
+        import ctypes
+        # Load the ROCm HIP shared library
+        hip_lib = ctypes.cdll.LoadLibrary("libamdhip64.so")
 
         # Cache medusa buffers (the fixed patterns for tree attention)
         medusa_buffers = generate_medusa_buffers(
                 medusa_choices, device=self.base_model.device
             )
-        medusa_buffers = medusa_buffers
-        medusa_choices = medusa_choices
+        
+        print(f"Rank {local_rank} is kv init...", flush=True)
+        self.medusa_buffers[local_rank]  = medusa_buffers
+        self.medusa_choices[local_rank]  = medusa_choices
 
         (
             past_key_values,
             past_key_values_data,
             current_length_data,
         ) = initialize_past_key_values(self.base_model)
-        
+        self.past_key_values[local_rank] = past_key_values
+        self.past_key_values_data[local_rank] = past_key_values_data
+        self.current_length_data[local_rank] = current_length_data
+
         input_len = input_ids.shape[1]
 
-        self.base_model.model.medusa_mask = medusa_buffers["medusa_attn_mask"]
         # Initialize tree attention mask and process prefill tokens
+        print(f"Rank {local_rank} is medusa init...", flush=True)
+
         medusa_logits, logits = initialize_medusa(
-            input_ids, self, medusa_buffers["medusa_attn_mask"], past_key_values
+            input_ids, self, medusa_buffers["medusa_attn_mask"], self.past_key_values[local_rank]
         )
 
         new_token = 0
-
-        torch.cuda.synchronize(device=f"cuda:{local_rank}")
+        print(f"Rank {local_rank} is synching on generation...", flush=True)
+        # torch.cuda.synchronize(device=f"cuda:{local_rank}")
+        
+        # Call hipDeviceSynchronize()
+        hip_lib.hipDeviceSynchronize()
         start_time = time.time()
 
         for idx in range(max_steps):
+            print(f"Rank {local_rank} is stepping generations...", flush=True)
             # Generate candidates with topk predictions from Medusa heads
             candidates, tree_candidates = generate_candidates(
                 medusa_logits,
                 logits,
-                medusa_buffers["tree_indices"],
-                medusa_buffers["retrieve_indices"],
+                self.medusa_buffers[local_rank]["tree_indices"],
+                self.medusa_buffers[local_rank]["retrieve_indices"],
             )
 
+            print(f"Rank {local_rank} is generate_candidates...", flush=True)
             # Use tree attention to verify the candidates and get predictions
             medusa_logits, logits, outputs = tree_decoding(
                 self,
                 tree_candidates,
-                past_key_values,
-                medusa_buffers["medusa_position_ids"],
+                self.past_key_values[local_rank],
+                self.medusa_buffers[local_rank]["medusa_position_ids"],
                 input_ids,
-                medusa_buffers["retrieve_indices"],
+                self.medusa_buffers[local_rank]["retrieve_indices"],
             )
+
+            print(f"Rank {local_rank} is tree_decoding...", flush=True)
 
             # Evaluate the posterior of the candidates to select the accepted candidate prefix
             best_candidate, accept_length = evaluate_posterior(
                 logits, candidates, temperature, posterior_threshold, posterior_alpha
             )
+
+            print(f"Rank {local_rank} is evaluate_posterior...", flush=True)
 
             # Update the input_ids and logits
             input_ids, logits, medusa_logits, new_token = update_inference_inputs(
@@ -305,21 +322,23 @@ class MedusaModel(nn.Module):
                 candidates,
                 best_candidate,
                 accept_length,
-                medusa_buffers["retrieve_indices"],
+                self.medusa_buffers[local_rank]["retrieve_indices"],
                 outputs,
                 logits,
                 medusa_logits,
                 new_token,
-                past_key_values_data,
-                current_length_data,
+                self.past_key_values_data[local_rank],
+                self.current_length_data[local_rank] ,
             )
+
+            print(f"Rank {local_rank} is update_inference_inputs...", flush=True)
 
             if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
                 break
             if new_token > 1024:
                 break
 
-        torch.cuda.synchronize(device=f"cuda:{local_rank}")
+        # torch.cuda.synchronize(device=f"cuda:{local_rank}")
+        hip_lib.hipDeviceSynchronize()
         total_time = time.time() - start_time
-        wall_time.append(total_time)
-        return input_ids, new_token
+        return input_ids, new_token, total_time

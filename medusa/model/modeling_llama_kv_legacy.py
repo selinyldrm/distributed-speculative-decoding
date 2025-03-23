@@ -889,6 +889,8 @@ class LlamaModel(LlamaPreTrainedModel):
     def _prepare_decoder_attention_mask(
         self, attention_mask, input_shape, inputs_embeds, past_key_values_length
     ):
+        import os
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         combined_attention_mask = None
@@ -900,6 +902,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 device=inputs_embeds.device,
                 past_key_values_length=past_key_values_length,
             )
+            # print(f"{local_rank} made combined_attention_mask : {combined_attention_mask.shape}", flush=True)
 
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
@@ -911,15 +914,16 @@ class LlamaModel(LlamaPreTrainedModel):
                 if combined_attention_mask is None
                 else expanded_attn_mask + combined_attention_mask
             )
+            # print(f"{local_rank} grew combined_attention_mask : {combined_attention_mask.shape}", flush=True)
 
         # [MODIFIED] add medusa mask
-        # import os
-        # local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        # if hasattr(self, "medusa_mask") and local_rank in self.medusa_mask and self.medusa_mask is not None:
-        #     medusa_mask = self.medusa_mask[local_rank]
-        if hasattr(self, "medusa_mask")  and  self.medusa_mask is not None:
-            medusa_mask = self.medusa_mask
+        
+        if hasattr(self, "medusa_mask") and local_rank in self.medusa_mask and self.medusa_mask[local_rank] is not None:
+            medusa_mask = self.medusa_mask[local_rank]
+        # if hasattr(self, "medusa_mask")  and  self.medusa_mask is not None:
+        #     medusa_mask = self.medusa_mask
             medusa_len = medusa_mask.size(-1)
+            # print(f"{local_rank} combined_attention_mask : {combined_attention_mask.shape}", flush=True)
             combined_attention_mask[:, :, -medusa_len:, -medusa_len:][
                 medusa_mask == 0
             ] = combined_attention_mask.min()

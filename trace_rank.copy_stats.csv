@@ -1,0 +1,6 @@
+"Name","Calls","TotalDurationNs","AverageNs","Percentage"
+"CopyDeviceToHost",4912,1716754544,349502,49.52997682425309
+"CopyHostToDevice",6147,1551392807,252382,44.75913580341334
+"CopyDeviceToDevice",16560,187532576,11324,5.410490495298483
+"FillBuffer",880,8269146,9396,0.23857260851168316
+"void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 2, 128, 1>(at::native::(anonymous namespace)::OpaqueType<4u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",256,2142886,8370,0.06182426852339609
