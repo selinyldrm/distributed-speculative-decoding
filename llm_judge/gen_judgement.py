@@ -210,8 +210,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     question_file = f"data/{args.bench_name}/question.jsonl"
-    answer_dir = f"data/{args.bench_name}/model_answer"
-    ref_answer_dir = f"data/{args.bench_name}/reference_answer"
+    answer_dir = f"/work1/deming/seliny2/Medusa/llm_judge/data/mt_bench/Llama-3.1-405B/20250325_032647/model_answer/0.jsonl"
+    ref_answer_dir = f"/work1/deming/seliny2/Medusa/llm_judge/data/mt_bench/reference_answer/gpt-2.jsonl"
 
     # Load questions
     questions = load_questions(question_file, None, None)
@@ -252,7 +252,7 @@ if __name__ == "__main__":
             make_match_func = make_match
             baseline_model = args.baseline_model
 
-    check_data(questions, model_answers, ref_answers, models, judges)
+    # check_data(questions, model_answers, ref_answers, models, judges)
 
     question_math = [q for q in questions if q["category"] in NEED_REF_CATS]
     question_default = [q for q in questions if q["category"] not in NEED_REF_CATS]

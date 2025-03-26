@@ -45,6 +45,7 @@ def main(args):
         world_size = int(os.getenv("WORLD_SIZE", "1"))
         torch.cuda.set_device(local_rank)
         deepspeed.init_distributed()
+        torch.backends.cuda.enable_flash_sdp(False)
 
         model = MedusaModel.from_pretrained(
             args.model,
@@ -85,10 +86,26 @@ def main(args):
         answer_file += f"{local_rank}.jsonl"
         questions = load_questions(question_file, None, None)
         # while True:
+
+        alpaca_template = """
+    {% if messages[0]['role'] == 'system' %}
+        {% set loop_messages = messages[1:] %}
+        {% set system_message = messages[0]['content'] %}
+    {% else %}
+        {% set loop_messages = messages %}
+        {% set system_message = false %}
+    {% endif %}
+
+    {% for message in loop_messages %}
+        {% if message['role'] == 'user' %}
+            {{ '### Instruction:\n' + message['content'] + '\n' }}
+        {% elif message['role'] == 'assistant' %}
+            {{ '### Response:\n' + message['content'] + '\n' }}
+        {% endif %}
+    {% endfor %}
+    """
         
-        if not conv:
-            conv = new_chat()
-        for question in tqdm(questions):
+        for idx, question in enumerate(tqdm(questions)):
             model.base_model.model.medusa_mask = {}
             model.base_model.model.medusa_mask[local_rank] = None
             model.medusa_buffers = {}
@@ -111,13 +128,14 @@ def main(args):
             new_tokens = []
             wall_time = []
             # for j in range(len(question["turns"])):
-            qs = question["turns"][0]
+            inp = question["turns"][0]
             # conv.append_message(conv.roles[0], qs)
             # conv.append_message(conv.roles[1], None)
             # prompt = conv.get_prompt()
-            prompt = qs
-
+            prompt = f"### Instruction:\n{inp}\n" 
+            print(prompt)
             input_ids = tokenizer([prompt]).input_ids
+           
             # chatio.prompt_for_output(conv.roles[1])
             print(f"Rank {local_rank} is starting generation...", flush=True)
             outputs, tokens, wall_time = model.medusa_generate(

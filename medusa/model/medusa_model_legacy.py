@@ -154,15 +154,15 @@ class MedusaModel(nn.Module):
             medusa_config.medusa_num_layers,
             medusa_config.base_model_name_or_path,
         )
-        medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.pt")
-        # from safetensors.torch import load_file
-        # medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.safetensors")
-        # medusa_head_state_dict = load_file(medusa_head_path)
-        if os.path.exists(medusa_head_path):
-            filename = medusa_head_path
-        else:
-            filename = hf_hub_download(medusa_head_name_or_path, "medusa_lm_head.pt")
-        medusa_head_state_dict = torch.load(filename, map_location=base_model.device)
+        # medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.pt")
+        from safetensors.torch import load_file
+        medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.safetensors")
+        medusa_head_state_dict = load_file(medusa_head_path)
+        # if os.path.exists(medusa_head_path):
+        #     filename = medusa_head_path
+        # else:
+        #     filename = hf_hub_download(medusa_head_name_or_path, "medusa_lm_head.pt")
+        # medusa_head_state_dict = torch.load(filename, map_location=base_model.device)
         model.medusa_head.load_state_dict(medusa_head_state_dict, strict=False)
         for idx, module in enumerate(model.medusa_head):
                 layer_device = next(module.parameters()).device
@@ -287,7 +287,6 @@ class MedusaModel(nn.Module):
         start_time = time.time()
 
         for idx in range(max_steps):
-            print(f"Rank {local_rank} is stepping generations...", flush=True)
             # Generate candidates with topk predictions from Medusa heads
             candidates, tree_candidates = generate_candidates(
                 medusa_logits,
@@ -296,8 +295,9 @@ class MedusaModel(nn.Module):
                 self.medusa_buffers[local_rank]["retrieve_indices"],
             )
 
-            print(f"Rank {local_rank} is generate_candidates...", flush=True)
             # Use tree attention to verify the candidates and get predictions
+            # hip_lib.hipDeviceSynchronize()
+            # start_time_decoding = time.time()
             medusa_logits, logits, outputs = tree_decoding(
                 self,
                 tree_candidates,
@@ -306,15 +306,15 @@ class MedusaModel(nn.Module):
                 input_ids,
                 self.medusa_buffers[local_rank]["retrieve_indices"],
             )
+            # hip_lib.hipDeviceSynchronize()
+            # total_time_decoding = time.time() - start_time_decoding
 
-            print(f"Rank {local_rank} is tree_decoding...", flush=True)
+            # print(f"total_time_decoding {local_rank}: {total_time_decoding}", flush=True)
 
             # Evaluate the posterior of the candidates to select the accepted candidate prefix
             best_candidate, accept_length = evaluate_posterior(
                 logits, candidates, temperature, posterior_threshold, posterior_alpha
             )
-
-            print(f"Rank {local_rank} is evaluate_posterior...", flush=True)
 
             # Update the input_ids and logits
             input_ids, logits, medusa_logits, new_token = update_inference_inputs(
@@ -330,8 +330,6 @@ class MedusaModel(nn.Module):
                 self.past_key_values_data[local_rank],
                 self.current_length_data[local_rank] ,
             )
-
-            print(f"Rank {local_rank} is update_inference_inputs...", flush=True)
 
             if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
                 break

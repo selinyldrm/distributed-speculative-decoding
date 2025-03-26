@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --exclusive
-#SBATCH --job-name=continue-medusa         # Name of the job
+#SBATCH --job-name=continue-3         # Name of the job
 #SBATCH --output=output-%j.log            # Output log file
 #SBATCH --error=error-%j.log              # Error log file
 #SBATCH --time=4:00:00                # Max runtime (HH:MM:SS)
@@ -41,4 +41,4 @@ ulimit -n 65536
 
 # base model test:
 accelerate launch --config_file /work1/deming/shared/.cache/huggingface/accelerate/default_config.yaml \
-    ./medusa/inference/cli_wo_medusa.py --base_model /work1/deming/shared/Llama-3.1-405B
+    ./medusa/inference/cli_wo_medusa2.py --base_model /work1/deming/shared/Llama-3.1-405B
