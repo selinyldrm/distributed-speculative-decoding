@@ -33,12 +33,12 @@ ulimit -n 65536
 # --model-id meta-llama/Llama-3.1-405B
 
 # with cli file inference : 
-# accelerate launch --config_file /work1/deming/shared/.cache/huggingface/accelerate/default_config.yaml ./medusa/inference/cli.py  \
-#     --model /work1/deming/shared/medusa-distributed-heads-Llama-3.1-405B_medusa_mlp_Llama-3.1-405B_medusa_5_lr_3e-05_layers_1  \
-#     --base_model /work1/deming/shared/Llama-3.1-405B
+accelerate launch --config_file /work1/deming/shared/.cache/huggingface/accelerate/default_config.yaml ./medusa/inference/cli.py  \
+    --model /work1/deming/shared/medusa-distributed-heads-Llama-3.1-405B_medusa_mlp_Llama-3.1-405B_medusa_5_lr_3e-05_layers_1  \
+    --base_model /work1/deming/shared/Llama-3.1-405B
 # accelerate launch --config_file /work1/deming/shared/.cache/huggingface/accelerate/default_config.yaml ./medusa/inference/cli.py \
 #     --model FasterDecoding/medusa-vicuna-7b-v1.3 --base_model lmsys/vicuna-7b-v1.3
 
 # base model test:
-accelerate launch --config_file /work1/deming/shared/.cache/huggingface/accelerate/default_config.yaml \
-    ./medusa/inference/cli_wo_medusa2.py --base_model /work1/deming/shared/Llama-3.1-405B
+# accelerate launch --config_file /work1/deming/shared/.cache/huggingface/accelerate/default_config.yaml \
+#     ./medusa/inference/cli_wo_medusa2.py --base_model /work1/deming/shared/Llama-3.1-405B
