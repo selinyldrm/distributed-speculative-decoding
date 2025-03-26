@@ -124,19 +124,13 @@ def main(args):
                 temperature = 0.7
 
             choices = []
-            # conv = get_conversation_template(args.base_model)
             new_tokens = []
             wall_time = []
-            # for j in range(len(question["turns"])):
             inp = question["turns"][0]
-            # conv.append_message(conv.roles[0], qs)
-            # conv.append_message(conv.roles[1], None)
-            # prompt = conv.get_prompt()
+            
             prompt = f"### Instruction:\n{inp}\n" 
             print(prompt)
             input_ids = tokenizer([prompt]).input_ids
-           
-            # chatio.prompt_for_output(conv.roles[1])
             print(f"Rank {local_rank} is starting generation...", flush=True)
             outputs, tokens, wall_time = model.medusa_generate(
                     torch.as_tensor(input_ids).to(f"cuda:{local_rank}"),
@@ -144,31 +138,16 @@ def main(args):
                     max_steps=args.max_steps
                 )
             print(f"Rank {local_rank} generated.", flush=True)
-            
             outputs = outputs[0][len(input_ids[0]) :]
-            # be consistent with the template's stop_token_ids
-            # if conv.stop_token_ids:
-            #     stop_token_ids_index = [
-            #         i
-            #         for i, id in enumerate(outputs)
-            #         if id in conv.stop_token_ids
-            #     ]
-            #     if len(stop_token_ids_index) > 0:
-            #         outputs = outputs[: stop_token_ids_index[0]]
-
             output = tokenizer.decode(
                 outputs,
                 skip_special_tokens=True,
                 spaces_between_special_tokens=False,
                 clean_up_tokenization_spaces=True,
             )
-            # if conv.stop_str and output.find(conv.stop_str) > 0:
-            #     output = output[: output.find(conv.stop_str)]
             output = output.strip()
             print(output)
-            
             new_tokens.append(int(tokens))
-            # conv.messages[-1][-1] = output
             choices = {"output": output, "new_tokens": new_tokens, "wall_time": wall_time}
            
 

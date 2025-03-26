@@ -272,14 +272,13 @@ class MedusaModel(nn.Module):
         input_len = input_ids.shape[1]
 
         # Initialize tree attention mask and process prefill tokens
-        print(f"Rank {local_rank} is medusa init...", flush=True)
+        print(f"Rank {local_rank} is medusa init'ing...", flush=True)
 
         medusa_logits, logits = initialize_medusa(
             input_ids, self, medusa_buffers["medusa_attn_mask"], self.past_key_values[local_rank]
         )
 
         new_token = 0
-        print(f"Rank {local_rank} is synching on generation...", flush=True)
         # torch.cuda.synchronize(device=f"cuda:{local_rank}")
         
         # Call hipDeviceSynchronize()
