@@ -59,12 +59,6 @@ def main(args):
         # while True:
 
         for idx, question in enumerate(tqdm(questions)):
-            if idx>=14 and idx <= 30 :
-                continue
-            if question["category"] in temperature_config:
-                temperature = temperature_config[question["category"]]
-            else:
-                temperature = 0.7
 
             choices = []
             wall_time = []
