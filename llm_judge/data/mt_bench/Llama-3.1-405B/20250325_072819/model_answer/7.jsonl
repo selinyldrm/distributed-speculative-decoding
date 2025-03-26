@@ -1,0 +1,23 @@
+{"question_id": 127, "choices": {"output": "The majority element is the element that appears more than n/2 times, where n is the size of the array.\nFor example, in the array [1, 2, 3, 4, 5, 5, 5, 5, 5, 5,", "num_generated_tokens": 60, "wall_time": 950.7621812820435}}
+{"question_id": 128, "choices": {"output": "Hint: use the recurrence relation B_n = \\sum_{k = 1}^{n - 1} B_k \\cdot B_{n - k}.\nInput: n = 3\nExplanation: There are 5 possible trees as shown below.", "num_generated_tokens": 53, "wall_time": 931.6277165412903}}
+{"question_id": 129, "choices": {"output": "The kth smallest element is in the position k when the two lists are merged and sorted.\nInput: [1, 3, 5, 7, 9], [2, 4, 6, 8, 10], 6\nInput: [1,", "num_generated_tokens": 60, "wall_time": 915.3228917121887}}
+{"question_id": 130, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 918.0229873657227}}
+{"question_id": 131, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 15.328307390213013}}
+{"question_id": 132, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 15.333762407302856}}
+{"question_id": 133, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 15.345197439193726}}
+{"question_id": 134, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 15.34978985786438}}
+{"question_id": 135, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 15.318917274475098}}
+{"question_id": 136, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 15.323600053787231}}
+{"question_id": 137, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 15.298741340637207}}
+{"question_id": 138, "choices": {"output": "For example: { \"iPhone\": 9.5, \"Samsung Galaxy\": 8.7, \"Google Pixel\": 8.2 }", "num_generated_tokens": 31, "wall_time": 719.2262163162231}}
+{"question_id": 139, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 15.297367811203003}}
+{"question_id": 140, "choices": {"output": "2022-04-01,170.00,173.50,169.50,172.80,18564300\n2022-04-02,173.00,176.85,171.50,175.20,19876500\n2022-05-", "num_generated_tokens": 60, "wall_time": 917.1468629837036}}
+{"question_id": 141, "choices": {"output": "What are the implications of these concepts for our understanding of the universe and the nature of reality?\nIn the field of quantum physics, what is superposition, and how does it relate to the phenomenon of quantum entanglement? What are the implications of these concepts for our understanding of the universe and the", "num_generated_tokens": 60, "wall_time": 912.4415850639343}}
+{"question_id": 142, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 915.0566122531891}}
+{"question_id": 143, "choices": {"output": "What are the key differences between these two stages?\nPhotosynthesis is a complex process that occurs in plants, algae, and some bacteria, which converts light energy into chemical energy. This chemical energy is stored in the form of glucose, which is then used by the organism for growth and other metabolic processes.", "num_generated_tokens": 60, "wall_time": 915.772748708725}}
+{"question_id": 144, "choices": {"output": "What is the exception to the central dogma?\nThe central dogma of molecular biology is the process of transcription and translation. The central dogma was named by Francis Crick. The exception to the central dogma is retroviruses. Retroviruses are viruses that contain RNA and convert it to", "num_generated_tokens": 60, "wall_time": 915.069637298584}}
+{"question_id": 145, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 915.0443296432495}}
+{"question_id": 146, "choices": {"output": "Finally, please include a citation for your example.\nExothermic reactions are those that release energy in the form of heat, while endothermic reactions absorb energy in the form of heat. The criteria used to distinguish between them is the change in enthalpy (\u0394H) of the reaction.", "num_generated_tokens": 60, "wall_time": 913.8516783714294}}
+{"question_id": 147, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 913.9218697547913}}
+{"question_id": 148, "choices": {"output": "What is the importance of each step? What are the risks associated with each step? What are the potential benefits of the process?\nTo design a solar-powered water heating system for a residential building, there are several key components and considerations that need to be taken into account. The following is a five-step", "num_generated_tokens": 60, "wall_time": 915.4180352687836}}
+{"question_id": 149, "choices": {"output": "", "num_generated_tokens": 1, "wall_time": 915.4651041030884}}
