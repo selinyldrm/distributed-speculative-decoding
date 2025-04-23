@@ -94,7 +94,7 @@ class CustomizedTrainer(Trainer):
             medusa_labels = medusa_labels[not_ignore]
 
             # Add top-k accuracy
-            for k in range(1, 2):
+            for k in range(1, 10):
                 _, topk = medusa_logits.topk(k, dim=-1)
                 topk = topk[not_ignore]
                 correct = topk.eq(medusa_labels.unsqueeze(-1)).any(-1)
@@ -107,7 +107,7 @@ class CustomizedTrainer(Trainer):
 
 @dataclass
 class ModelArguments:
-    model_name_or_path: Optional[str] = field(default="lmsys/vicuna-7b-v1.3")
+    model_name_or_path: Optional[str] = field(default="meta-llama/Llama-3.1-405B")
     load_in_4bit: bool = field(
         default=False,
         metadata={"help": "Load in 4 bit."},
@@ -136,13 +136,13 @@ class TrainingArguments(transformers.TrainingArguments):
     report_to: Optional[str] = None
     optim: str = field(default="adamw_torch")
     model_max_length: int = field(
-        default=2048,
+        default=8192,
         metadata={
             "help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."
         },
     )
     medusa_num_heads: int = field(
-        default=1,
+        default=5,
         metadata={"help": "Number of Medusa heads."},
     )
     medusa_num_layers: int = field(
@@ -232,8 +232,6 @@ class SupervisedDataset(Dataset):
     def __init__(self, raw_data, tokenizer: transformers.PreTrainedTokenizer):
         super(SupervisedDataset, self).__init__()
 
-        super(SupervisedDataset, self).__init__()
-
         self.tokenizer = tokenizer
         self.input_ids = raw_data["input_ids"]  # Directly use the tensors
         self.labels = raw_data["labels"]
@@ -269,17 +267,6 @@ class SupervisedDataset(Dataset):
             attention_mask=self.attention_mask[i],
         )
 
-def save_preprocessed_data(dataset, save_path):
-    """Save preprocessed dataset to disk."""
-    # Convert the dataset to a format that can be saved
-    data_dict = {
-        "input_ids": dataset.input_ids,
-        "labels": dataset.labels,
-        "attention_mask": dataset.attention_mask,
-    }
-    # Save using torch.save
-    torch.save(data_dict, save_path)
-    print(f"Preprocessed data saved to {save_path}")
 
 def load_preprocessed_data(load_path, tokenizer):
     """Load preprocessed dataset from disk."""
@@ -307,7 +294,11 @@ def make_supervised_data_module(
 
     rank0_print("Loading data...")
 
-    train_dataset = load_preprocessed_data("/work1/deming/shared/alpaca-gpt4/preprocessed_train.pt", tokenizer)
+    from datasets import load_from_disk
+    train_dataset = load_from_disk("/work1/deming/shared/alpaca-gpt4/preprocessed_train")
+    half_length = len(train_dataset) // 3
+    train_dataset = train_dataset.select(range(half_length))
+    # train_dataset = load_preprocessed_data("/work1/deming/shared/alpaca-gpt4/preprocessed_train.pt", tokenizer)
     if train_dataset is None:
         # Preprocess and save training data
         train_dataset = load_dataset("/work1/deming/shared/alpaca-gpt4", split="train")
@@ -320,10 +311,31 @@ def make_supervised_data_module(
             return example
 
         train_dataset = train_dataset.map(format_dataset)
-        train_dataset = SupervisedDataset(train_dataset, tokenizer=tokenizer)
-        train_save_path = os.path.join(data_args.data_path, "/work1/deming/shared/alpaca-gpt4/preprocessed_train.pt")
-        save_preprocessed_data(train_dataset, train_save_path)
-    
+
+        # Step 3: Tokenize the formatted text
+        def tokenize(example):
+            tokenized = tokenizer(
+                example["formatted_text"],
+                truncation=True,
+                padding="max_length",
+                max_length=8192,
+            )
+            tokenized["labels"] = tokenized["input_ids"].copy()
+            return tokenized
+
+        tokenized_dataset = train_dataset.map(tokenize)
+
+        columns_to_keep = ["input_ids", "attention_mask", "labels"]
+        all_columns = tokenized_dataset.column_names
+        columns_to_remove = [col for col in all_columns if col not in columns_to_keep]
+
+        tokenized_dataset = tokenized_dataset.remove_columns(columns_to_remove)
+
+        train_save_path = os.path.join(data_args.data_path, "/work1/deming/shared/alpaca-gpt4/preprocessed_train")
+        tokenized_dataset.save_to_disk(train_save_path)
+        print(f"Preprocessed data saved to {train_save_path}")
+        train_dataset = tokenized_dataset
+
     # print(f"train_dataset after dataset_cls: {train_dataset}")
 
     # # Load eval dataset from Parquet file if provided
@@ -337,13 +349,17 @@ def make_supervised_data_module(
     return dict(train_dataset=train_dataset, eval_dataset=None)
 
 
+
+
 def train():
     global local_rank
 
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments)
     )
+    
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    training_args.label_names=["labels"]
     local_rank = training_args.local_rank
 
     # Set RoPE scaling factor
@@ -427,13 +443,6 @@ def train():
         medusa_num_layers=training_args.medusa_num_layers,
         base_model_name_or_path=model_args.model_name_or_path,
     )
-    print("distributing medusa heads...")
-    head_engine = deepspeed.initialize(
-        config="/work1/deming/seliny2/axolotl/deepspeed/zero3-offload.json",
-        model=medusa_lm_head)[0]
-    medusa_lm_head = head_engine.module
-
-    print("distributed medusa heads.")
     # Generate Medusa config for pushing to HF hub
     medusa_config = MedusaConfig(
         medusa_num_heads=training_args.medusa_num_heads,
